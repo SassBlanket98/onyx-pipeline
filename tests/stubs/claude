@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Stub claude: plan or research report, with cap/question/size modes."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+
+def _jobs_dir() -> Path | None:
+    raw = os.environ.get("ONYX_JOBS_DIR")
+    return Path(raw) if raw else None
+
+
+def _log(argv: list[str]) -> None:
+    jobs = _jobs_dir()
+    if jobs is None:
+        return
+    jobs.mkdir(parents=True, exist_ok=True)
+    with (jobs / ".worker-log").open("a") as fh:
+        fh.write("claude " + " ".join(argv) + "\n")
+
+
+def _bump(name: str) -> int:
+    jobs = _jobs_dir()
+    if jobs is None:
+        return 1
+    path = jobs / f".stub-count-{name}"
+    n = int(path.read_text()) if path.exists() else 0
+    n += 1
+    path.write_text(str(n))
+    return n
+
+
+def _parts_block(mode: str) -> str:
+    if mode == "parts":
+        return (
+            "## PARTS\n"
+            "PART 1: Alpha | FILES: a.py | AFTER: none | JUDGMENT: none\n"
+            "Add a marker to a.py.\n"
+            "PART 2: Beta | FILES: b.py | AFTER: none | JUDGMENT: none\n"
+            "Add a marker to b.py.\n"
+            "PART 3: Gamma | FILES: c.py | AFTER: none | JUDGMENT: none\n"
+            "Add a marker to c.py.\n"
+        )
+    if mode == "parts-dep":
+        return (
+            "## PARTS\n"
+            "PART 1: Base | FILES: a.py | AFTER: none | JUDGMENT: none\n"
+            "Write the base helper in a.py.\n"
+            "PART 2: Uses base | FILES: b.py | AFTER: 1 | JUDGMENT: none\n"
+            "Use the helper from a.py in b.py.\n"
+        )
+    if mode == "parts-clash":
+        return (
+            "## PARTS\n"
+            "PART 1: Alpha | FILES: a.py | AFTER: none | JUDGMENT: none\n"
+            "Edit a.py.\n"
+            "PART 2: Beta | FILES: b.py | AFTER: none | JUDGMENT: none\n"
+            "Edit b.py.\n"
+        )
+    if mode == "parts-bad":
+        return "## PARTS\nthis is not a valid part header\nPART 2 has no structure\n"
+    if mode == "parts-cycle":
+        return (
+            "## PARTS\n"
+            "PART 1: A | FILES: a.py | AFTER: 2 | JUDGMENT: none\n"
+            "one\n"
+            "PART 2: B | FILES: b.py | AFTER: 1 | JUDGMENT: none\n"
+            "two\n"
+        )
+    if mode == "parts-too-many":
+        lines = ["## PARTS\n"]
+        for i in range(1, 5):
+            lines.append(
+                f"PART {i}: P{i} | FILES: p{i}.py | AFTER: none | JUDGMENT: none\nstep {i}\n"
+            )
+        return "".join(lines)
+    if mode == "parts-shared":
+        return (
+            "## PARTS\n"
+            "PART 1: A | FILES: a.py, shared.py | AFTER: none | JUDGMENT: none\n"
+            "one\n"
+            "PART 2: B | FILES: b.py, shared.py | AFTER: none | JUDGMENT: none\n"
+            "two\n"
+        )
+    return ""
+
+
+def _plan_text(mode: str) -> str:
+    verify = os.environ.get("STUB_VERIFY_CMD", "true")
+    judgment = os.environ.get("STUB_JUDGMENT", "none")
+    size = "small"
+    questions = ""
+    if mode == "big":
+        size = "big"
+    elif mode == "garbled":
+        size = "enormous"
+    elif mode == "questions":
+        questions = "\n## OPEN QUESTIONS\n- What is the target API?\n"
+    header = (
+        "# Plan\n"
+        "Implement the task.\n"
+        "\n"
+        "## GOAL\n"
+        "Ship the requested change.\n"
+        "\n"
+        "## CHANGES\n"
+        "- files in the repo — implement the task\n"
+        "\n"
+        "## OUT OF SCOPE\n"
+        "- unrelated files\n"
+        "\n"
+        "## ASSUMPTIONS AND DEVIATIONS\n"
+        "none\n"
+    )
+    parts = _parts_block(mode)
+    if parts:
+        header = header + parts
+    if os.environ.get("STUB_NO_VERIFY") or mode == "no-verify":
+        return f"{header}{questions}SIZE: {size}\nJUDGMENT: {judgment}\n"
+    return f"{header}{questions}SIZE: {size}\nJUDGMENT: {judgment}\nVERIFY: {verify}\n"
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    _log(argv)
+    prompt = argv[-1] if argv else ""
+    mode = os.environ.get("STUB_CLAUDE_MODE", "ok")
+    n = _bump("claude")
+
+    if mode == "capped":
+        print("Error: usage limit reached")
+        sys.exit(1)
+    if mode == "capped-then-ok":
+        if n == 1:
+            print("Error: rate limit")
+            sys.exit(1)
+        mode = "ok"
+    if mode == "questions-then-ok":
+        mode = "questions" if n == 1 else "ok"
+    if mode == "empty":
+        print("")
+        return
+
+    if "verdict first" in prompt:
+        print("# Verdict\nThe claim holds.\n\nBody of the research report.\n")
+        return
+
+    print(_plan_text(mode), end="")
+
+
+if __name__ == "__main__":
+    main()

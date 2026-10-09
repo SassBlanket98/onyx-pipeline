@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Stub codex: review and exec fact-check."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+
+def _jobs_dir() -> Path | None:
+    raw = os.environ.get("ONYX_JOBS_DIR")
+    return Path(raw) if raw else None
+
+
+def _log(argv: list[str]) -> None:
+    jobs = _jobs_dir()
+    if jobs is None:
+        return
+    jobs.mkdir(parents=True, exist_ok=True)
+    with (jobs / ".worker-log").open("a") as fh:
+        fh.write("codex " + " ".join(argv) + "\n")
+
+
+def _bump(name: str) -> int:
+    jobs = _jobs_dir()
+    if jobs is None:
+        return 1
+    path = jobs / f".stub-count-{name}"
+    n = int(path.read_text()) if path.exists() else 0
+    n += 1
+    path.write_text(str(n))
+    return n
+
+
+def _verdict_text() -> str:
+    mode = os.environ.get("STUB_REVIEW", "pass")
+    n = _bump("review")
+    if mode == "missing":
+        return "# Review\nLooks fine.\n"
+    if mode == "corrections":
+        return "# Review\nStep 4 names the wrong tool.\nVERDICT: CORRECTIONS\n"
+    if mode == "fail":
+        verdict = "FAIL"
+    elif mode == "fail-then-pass":
+        verdict = "FAIL" if n == 1 else "PASS"
+    else:
+        verdict = "PASS"
+    return f"# Review\nChecked the diff.\nVERDICT: {verdict}\n"
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    _log(argv)
+    if os.environ.get("STUB_REVIEW") == "broken":
+        print("codex: internal error", file=sys.stderr)
+        sys.exit(2)
+    text = _verdict_text()
+    if argv and argv[0] == "exec":
+        if "-o" in argv:
+            out = Path(argv[argv.index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(text)
+        print(text, end="")
+        return
+    print(text, end="")
+
+
+if __name__ == "__main__":
+    main()

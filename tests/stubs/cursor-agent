@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""Stub cursor-agent: investigate, plan fallback, build, and fix."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+
+def _jobs_dir() -> Path | None:
+    raw = os.environ.get("ONYX_JOBS_DIR")
+    return Path(raw) if raw else None
+
+
+def _log(argv: list[str]) -> None:
+    jobs = _jobs_dir()
+    if jobs is None:
+        return
+    jobs.mkdir(parents=True, exist_ok=True)
+    with (jobs / ".worker-log").open("a") as fh:
+        fh.write("cursor-agent " + " ".join(argv) + "\n")
+
+
+def _workspace(argv: list[str]) -> Path:
+    if "--workspace" in argv:
+        idx = argv.index("--workspace")
+        return Path(argv[idx + 1])
+    return Path.cwd()
+
+
+def _bump(name: str) -> int:
+    jobs = _jobs_dir()
+    if jobs is None:
+        return 1
+    path = jobs / f".stub-count-{name}"
+    n = int(path.read_text()) if path.exists() else 0
+    n += 1
+    path.write_text(str(n))
+    return n
+
+
+def _parts_block(mode: str) -> str:
+    if mode == "parts":
+        return (
+            "## PARTS\n"
+            "PART 1: Alpha | FILES: a.py | AFTER: none | JUDGMENT: none\n"
+            "Add a marker to a.py.\n"
+            "PART 2: Beta | FILES: b.py | AFTER: none | JUDGMENT: none\n"
+            "Add a marker to b.py.\n"
+            "PART 3: Gamma | FILES: c.py | AFTER: none | JUDGMENT: none\n"
+            "Add a marker to c.py.\n"
+        )
+    if mode == "parts-dep":
+        return (
+            "## PARTS\n"
+            "PART 1: Base | FILES: a.py | AFTER: none | JUDGMENT: none\n"
+            "Write the base helper in a.py.\n"
+            "PART 2: Uses base | FILES: b.py | AFTER: 1 | JUDGMENT: none\n"
+            "Use the helper from a.py in b.py.\n"
+        )
+    if mode == "parts-clash":
+        return (
+            "## PARTS\n"
+            "PART 1: Alpha | FILES: a.py | AFTER: none | JUDGMENT: none\n"
+            "Edit a.py.\n"
+            "PART 2: Beta | FILES: b.py | AFTER: none | JUDGMENT: none\n"
+            "Edit b.py.\n"
+        )
+    if mode == "parts-bad":
+        return "## PARTS\nthis is not a valid part header\nPART 2 has no structure\n"
+    if mode == "parts-cycle":
+        return (
+            "## PARTS\n"
+            "PART 1: A | FILES: a.py | AFTER: 2 | JUDGMENT: none\n"
+            "one\n"
+            "PART 2: B | FILES: b.py | AFTER: 1 | JUDGMENT: none\n"
+            "two\n"
+        )
+    if mode == "parts-too-many":
+        lines = ["## PARTS\n"]
+        for i in range(1, 5):
+            lines.append(
+                f"PART {i}: P{i} | FILES: p{i}.py | AFTER: none | JUDGMENT: none\nstep {i}\n"
+            )
+        return "".join(lines)
+    if mode == "parts-shared":
+        return (
+            "## PARTS\n"
+            "PART 1: A | FILES: a.py, shared.py | AFTER: none | JUDGMENT: none\n"
+            "one\n"
+            "PART 2: B | FILES: b.py, shared.py | AFTER: none | JUDGMENT: none\n"
+            "two\n"
+        )
+    return ""
+
+
+def _plan_text() -> str:
+    mode = os.environ.get("STUB_PLAN_MODE") or os.environ.get("STUB_CLAUDE_MODE", "ok")
+    if mode == "questions-then-ok":
+        n = _bump("plan")
+        mode = "questions" if n == 1 else "ok"
+    verify = os.environ.get("STUB_VERIFY_CMD", "true")
+    judgment = os.environ.get("STUB_JUDGMENT", "none")
+    size = "small"
+    questions = ""
+    if mode == "big":
+        size = "big"
+    elif mode == "garbled":
+        size = "enormous"
+    elif mode == "questions":
+        questions = "\n## OPEN QUESTIONS\n- What is the target API?\n"
+    elif mode == "no-verify":
+        verify = ""
+    header = (
+        "# Plan\n"
+        "Implement the task.\n"
+        "\n"
+        "## GOAL\n"
+        "Ship the requested change.\n"
+        "\n"
+        "## CHANGES\n"
+        "- files in the repo — implement the task\n"
+        "\n"
+        "## OUT OF SCOPE\n"
+        "- unrelated files\n"
+        "\n"
+        "## ASSUMPTIONS AND DEVIATIONS\n"
+        "none\n"
+    )
+    parts = _parts_block(mode)
+    if parts:
+        header = header + parts
+    if os.environ.get("STUB_NO_VERIFY"):
+        return f"{header}{questions}SIZE: {size}\nJUDGMENT: {judgment}\n"
+    if verify == "" and mode == "no-verify":
+        return f"{header}{questions}SIZE: {size}\nJUDGMENT: {judgment}\n"
+    return f"{header}{questions}SIZE: {size}\nJUDGMENT: {judgment}\nVERIFY: {verify}\n"
+
+
+def _owned_files(prompt: str) -> list[str]:
+    for line in prompt.splitlines():
+        if "only edit these files" in line.lower():
+            _, _, rest = line.partition(":")
+            return [p.strip() for p in rest.split(",") if p.strip()]
+    return []
+
+
+def _part_n(workspace: Path, prompt: str) -> int:
+    if workspace.parent.name == "parts" and workspace.name.isdigit():
+        return int(workspace.name)
+    match = re.search(r"Part\s+(\d+):", prompt, re.I)
+    return int(match.group(1)) if match else 0
+
+
+def _record_times(n: int, start: float, end: float) -> None:
+    raw = os.environ.get("STUB_TIMES_FILE")
+    if not raw:
+        return
+    path = Path(raw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as fh:
+        fh.write(json.dumps({"n": n, "start": start, "end": end}) + "\n")
+
+
+def _build(workspace: Path, prompt: str) -> None:
+    start = time.time()
+    sleep_s = float(os.environ.get("STUB_BUILD_SLEEP", "0") or "0")
+    if sleep_s > 0:
+        time.sleep(sleep_s)
+    owned = _owned_files(prompt)
+    n = _part_n(workspace, prompt)
+    if owned:
+        for rel in owned:
+            path = workspace / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a") as fh:
+                fh.write(f"part {n}\n")
+        mode = os.environ.get("STUB_CLAUDE_MODE", "")
+        if mode == "parts-clash":
+            shared = workspace / "shared.py"
+            shared.write_text(f"x = {n}\n")
+    else:
+        rel = os.environ.get("STUB_BUILD_TOUCH", "onyx-built.txt")
+        path = workspace / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as fh:
+            fh.write("built\n")
+    end = time.time()
+    _record_times(n, start, end)
+    fail = os.environ.get("STUB_FAIL_PART", "")
+    if fail.isdigit() and int(fail) == n:
+        print("build failed", file=sys.stderr)
+        sys.exit(1)
+    print("build complete")
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    _log(argv)
+    workspace = _workspace(argv)
+    prompt = argv[-1] if argv else ""
+
+    if "--force" in argv:
+        _build(workspace, prompt)
+        return
+
+    if "verdict first" in prompt:
+        print("# Verdict\nSupported.\n\n# Report\nFindings from sources.\n")
+        return
+
+    if "step-by-step implementation plan" in prompt or "SIZE: small|big" in prompt:
+        print(_plan_text(), end="")
+        return
+
+    print("# Evidence\nREADME:1 exists in the workspace.\n")
+
+
+if __name__ == "__main__":
+    main()
