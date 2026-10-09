@@ -2,7 +2,7 @@
 
 A CLI that runs Onyx's task pipeline: investigate, plan, build, verify, review, and summarize. Onyx starts a job and relays the five-line summary; the script owns the rest.
 
-Onyx is my personal assistant: a small local model (9B) that I talk to over Telegram. A model that size cannot be trusted to plan, build and check code changes by itself, so it does one thing: start a job. This script then runs each stage with a suitable worker (Claude Code, Codex, or a cheaper CLI), works in a separate git worktree, stops for my approval after the plan, and sends me the result.
+Onyx is my personal assistant: a small local model (9B) that I talk to over Telegram. A model that size cannot be trusted to plan, build and check code changes by itself, so it does one thing: start a job. This script then runs each stage with a suitable worker (Claude Code, Codex, or a cheaper CLI), works in a separate git worktree, stops for my approval after the plan, and sends me the result. AI coding agents wrote the code under my direction.
 
 The defaults (paths under `~/.openclaw`, the Telegram session) are from my own setup and are all overridable through the environment variables below. The test suite runs without any of it: workers are replaced by stub binaries.
 
